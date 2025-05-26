@@ -165,8 +165,13 @@ def decode_protobuf(binary):
 def handle_requests():
     uid = request.args.get("uid")
     server_name = request.args.get("region", "").upper()
-    if not uid or not server_name:
-        return jsonify({"error": "UID and region are required"}), 400
+    key = request.args.get("key")
+
+    if not uid or not server_name or not key:
+        return jsonify({"error": "UID, region, and key are required"}), 400
+
+    if key != "1weekkeysforujjaiwal":
+        return jsonify({"error": "Invalid API key"}), 403
 
     try:
         def process_request():
