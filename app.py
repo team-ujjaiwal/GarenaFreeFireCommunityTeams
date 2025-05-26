@@ -164,9 +164,9 @@ def decode_protobuf(binary):
 @app.route('/like', methods=['GET'])
 def handle_requests():
     uid = request.args.get("uid")
-    server_name = request.args.get("server_name", "").upper()
+    server_name = request.args.get("region", "").upper()
     if not uid or not server_name:
-        return jsonify({"error": "UID and server_name are required"}), 400
+        return jsonify({"error": "UID and region are required"}), 400
 
     try:
         def process_request():
