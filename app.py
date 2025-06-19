@@ -187,7 +187,7 @@ async def send_multiple_requests(uid, server_name, url):
             return None
         
         # Calculate how many times we need to loop through all tokens
-        num_requests = 100
+        num_requests = 50
         tokens_count = len(tokens)
         full_cycles = num_requests // tokens_count
         remainder = num_requests % tokens_count
