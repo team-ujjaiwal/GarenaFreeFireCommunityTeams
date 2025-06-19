@@ -11,14 +11,102 @@ import like_pb2
 import like_count_pb2
 import uid_generator_pb2
 from google.protobuf.message import DecodeError
+import time
+from concurrent.futures import ThreadPoolExecutor
+import random
 
 app = Flask(__name__)
 
+# Global variables for token management
+generated_tokens = []
+last_token_generation_time = 0
+TOKEN_VALIDITY = 82800  # 23 hours (to regenerate before expiry)
+JWT_API_URL = "https://aditya-jwt-v9op.onrender.com/token"
+
+def load_credentials():
+    """Load UID and password combinations from token_ind.json"""
+    try:
+        with open("token_ind.json", "r") as f:
+            credentials = json.load(f)
+            # Shuffle to distribute load across different accounts
+            random.shuffle(credentials)
+            return credentials
+    except Exception as e:
+        app.logger.error(f"Error loading token_ind.json: {e}")
+        return None
+
+def generate_single_token(cred):
+    """Generate a single JWT token for given credentials"""
+    try:
+        uid = cred.get("uid")
+        password = cred.get("password")
+        if not uid or not password:
+            return None
+        
+        response = requests.get(
+            f"{JWT_API_URL}?uid={uid}&password={password}",
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "token": data.get("token"),
+                "expiry": time.time() + data.get("ttl", 86400)
+            }
+        else:
+            app.logger.error(f"Failed to generate token for UID {uid}. Status: {response.status_code}")
+            return None
+    except Exception as e:
+        app.logger.error(f"Error generating token for UID {cred.get('uid')}: {e}")
+        return None
+
+def generate_all_tokens():
+    """Generate tokens for all credentials in parallel"""
+    global generated_tokens, last_token_generation_time
+    
+    current_time = time.time()
+    # Only regenerate if tokens are expired or about to expire
+    if not generated_tokens or any(token['expiry'] <= current_time + 300 for token in generated_tokens):
+        credentials_list = load_credentials()
+        if not credentials_list:
+            return False
+        
+        app.logger.info(f"Generating fresh tokens for {len(credentials_list)} accounts...")
+        
+        # Generate tokens in parallel (10 concurrent requests)
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(generate_single_token, credentials_list))
+        
+        # Filter out None values and expired tokens
+        generated_tokens = [
+            token for token in results 
+            if token is not None and token['expiry'] > current_time
+        ]
+        
+        last_token_generation_time = current_time
+        app.logger.info(f"Successfully generated {len(generated_tokens)} valid tokens")
+        
+        if not generated_tokens:
+            return False
+    
+    return True
+
+def get_valid_tokens():
+    """Return only valid tokens that haven't expired"""
+    current_time = time.time()
+    return [token for token in generated_tokens if token['expiry'] > current_time]
+
 def load_tokens(server_name):
+    """Load tokens for the specified server"""
     try:
         if server_name == "IND":
-            with open("token_ind.json", "r") as f:
-                tokens = json.load(f)
+            if not generate_all_tokens():
+                return None
+            valid_tokens = get_valid_tokens()
+            if not valid_tokens:
+                return None
+            return [{"token": token["token"]} for token in valid_tokens]
         elif server_name in {"BR", "US", "SAC", "NA"}:
             with open("token_br.json", "r") as f:
                 tokens = json.load(f)
@@ -31,6 +119,7 @@ def load_tokens(server_name):
         return None
 
 def encrypt_message(plaintext):
+    """Encrypt message using AES-CBC"""
     try:
         key = b'Yg&tc%DEuh6%Zc^8'
         iv = b'6oyZDr22E3ychjM%'
@@ -43,6 +132,7 @@ def encrypt_message(plaintext):
         return None
 
 def create_protobuf_message(user_id, region):
+    """Create protobuf message for like request"""
     try:
         message = like_pb2.like()
         message.uid = int(user_id)
@@ -53,6 +143,7 @@ def create_protobuf_message(user_id, region):
         return None
 
 async def send_request(encrypted_uid, token, url):
+    """Send a single like request"""
     try:
         edata = bytes.fromhex(encrypted_uid)
         headers = {
@@ -77,24 +168,41 @@ async def send_request(encrypted_uid, token, url):
         return None
 
 async def send_multiple_requests(uid, server_name, url):
+    """Send 100 like requests using available tokens"""
     try:
         region = server_name
         protobuf_message = create_protobuf_message(uid, region)
         if protobuf_message is None:
             app.logger.error("Failed to create protobuf message.")
             return None
+            
         encrypted_uid = encrypt_message(protobuf_message)
         if encrypted_uid is None:
             app.logger.error("Encryption failed.")
             return None
-        tasks = []
+            
         tokens = load_tokens(server_name)
         if tokens is None:
             app.logger.error("Failed to load tokens.")
             return None
-        for i in range(100):
-            token = tokens[i % len(tokens)]["token"]
-            tasks.append(send_request(encrypted_uid, token, url))
+        
+        # Calculate how many times we need to loop through all tokens
+        num_requests = 100
+        tokens_count = len(tokens)
+        full_cycles = num_requests // tokens_count
+        remainder = num_requests % tokens_count
+        
+        tasks = []
+        
+        # Add full cycles of all tokens
+        for _ in range(full_cycles):
+            for token_data in tokens:
+                tasks.append(send_request(encrypted_uid, token_data["token"], url))
+        
+        # Add remaining requests
+        for i in range(remainder):
+            tasks.append(send_request(encrypted_uid, tokens[i]["token"], url))
+            
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return results
     except Exception as e:
@@ -102,6 +210,7 @@ async def send_multiple_requests(uid, server_name, url):
         return None
 
 def create_protobuf(uid):
+    """Create protobuf for UID generation"""
     try:
         message = uid_generator_pb2.uid_generator()
         message.saturn_ = int(uid)
@@ -112,6 +221,7 @@ def create_protobuf(uid):
         return None
 
 def enc(uid):
+    """Encrypt UID for requests"""
     protobuf_data = create_protobuf(uid)
     if protobuf_data is None:
         return None
@@ -119,6 +229,7 @@ def enc(uid):
     return encrypted_uid
 
 def make_request(encrypt, server_name, token):
+    """Make request to get player info"""
     try:
         if server_name == "IND":
             url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
@@ -126,6 +237,7 @@ def make_request(encrypt, server_name, token):
             url = "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
         else:
             url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+            
         edata = bytes.fromhex(encrypt)
         headers = {
             'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
@@ -150,6 +262,7 @@ def make_request(encrypt, server_name, token):
         return None
 
 def decode_protobuf(binary):
+    """Decode protobuf response"""
     try:
         items = like_count_pb2.Info()
         items.ParseFromString(binary)
@@ -163,6 +276,7 @@ def decode_protobuf(binary):
 
 @app.route('/like', methods=['GET'])
 def handle_requests():
+    """Main endpoint for like requests"""
     uid = request.args.get("uid")
     server_name = request.args.get("region", "").upper()
     key = request.args.get("key")
@@ -183,13 +297,16 @@ def handle_requests():
             if encrypted_uid is None:
                 raise Exception("Encryption of UID failed.")
 
+            # Get initial like count
             before = make_request(encrypted_uid, server_name, token)
             if before is None:
                 raise Exception("Failed to retrieve initial player info.")
+            
             try:
                 jsone = MessageToJson(before)
             except Exception as e:
                 raise Exception(f"Error converting 'before' protobuf to JSON: {e}")
+                
             data_before = json.loads(jsone)
             before_like = data_before.get('AccountInfo', {}).get('Likes', 0)
             try:
@@ -198,6 +315,7 @@ def handle_requests():
                 before_like = 0
             app.logger.info(f"Likes before command: {before_like}")
 
+            # Determine API endpoint
             if server_name == "IND":
                 url = "https://client.ind.freefiremobile.com/LikeProfile"
             elif server_name in {"BR", "US", "SAC", "NA"}:
@@ -205,21 +323,27 @@ def handle_requests():
             else:
                 url = "https://clientbp.ggblueshark.com/LikeProfile"
 
+            # Send 100 like requests
             asyncio.run(send_multiple_requests(uid, server_name, url))
 
+            # Get updated like count
             after = make_request(encrypted_uid, server_name, token)
             if after is None:
                 raise Exception("Failed to retrieve player info after like requests.")
+                
             try:
                 jsone_after = MessageToJson(after)
             except Exception as e:
                 raise Exception(f"Error converting 'after' protobuf to JSON: {e}")
+                
             data_after = json.loads(jsone_after)
             after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
             player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
             player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
+            
             like_given = after_like - before_like
             status = 1 if like_given != 0 else 2
+            
             result = {
                 "LikesGivenByAPI": like_given,
                 "LikesbeforeCommand": before_like,
@@ -237,4 +361,6 @@ def handle_requests():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, use_reloader=False)
+    # Pre-generate tokens when starting the server
+    generate_all_tokens()
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
