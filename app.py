@@ -170,7 +170,7 @@ def handle_requests():
     if not uid or not server_name or not key:
         return jsonify({"error": "UID, region, and key are required"}), 400
 
-    if key != "1weekkeysforujjaiwal":
+    if key != "permanentskeysforujjaiwal":
         return jsonify({"error": "Invalid API key"}), 403
 
     try:
