@@ -194,7 +194,7 @@ def handle_requests():
             tokens_list = tokens_data.get("tokens")
             if not tokens_list:
                 raise Exception("No tokens received from JWT API.")
-            token = tokens_list[0]["token"]
+            token = tokens_list[0]  # Note: list of strings, no ["token"]
 
             encrypted_uid = enc(uid)
             if encrypted_uid is None:
