@@ -59,7 +59,7 @@ def enc(uid):
 
 # Fetch fresh tokens from your JWT API
 async def fetch_tokens_from_jwt_api():
-    url = "https://free-fire-india-jwt.onrender.com/token"
+    url = "https://free-fire-india-six.vercel.app/token"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
