@@ -109,21 +109,24 @@ async def send_multiple_requests(uid, server_name, url):
         if protobuf_message is None:
             app.logger.error("Failed to create protobuf message.")
             return None
+
         encrypted_uid = encrypt_message(protobuf_message)
         if encrypted_uid is None:
             app.logger.error("Encryption failed.")
             return None
+
         tokens = await fetch_tokens_from_jwt_api()
         if tokens is None:
             app.logger.error("Failed to load tokens from JWT API.")
             return None
 
         tasks = []
-        for token_entry in tokens:
-            token = token_entry["token"]
+        for token in tokens:
             tasks.append(send_request(encrypted_uid, token, url))
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return results
+
     except Exception as e:
         app.logger.error(f"Exception in send_multiple_requests: {e}")
         return None
