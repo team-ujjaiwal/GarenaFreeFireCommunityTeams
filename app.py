@@ -57,23 +57,41 @@ def enc(uid):
     encrypted_uid = encrypt_message(protobuf_data)
     return encrypted_uid
 
-# Fetch fresh tokens from your JWT API
-async def fetch_tokens_from_jwt_api():
-    url = "https://free-fire-india-six.vercel.app/token"
+# Fetch tokens from all 5 JWT APIs
+async def fetch_all_tokens():
+    urls = [
+        "https://free-fire-india-six.vercel.app/token",
+        "https://free-fire-india-five.vercel.app/token",
+        "https://free-fire-india-four.vercel.app/token",
+        "https://free-fire-india-three.vercel.app/token",
+        "https://free-fire-india-two.vercel.app/token"
+    ]
+    all_tokens = []
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
+            tasks = [session.get(url) for url in urls]
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+            for response in responses:
+                if isinstance(response, Exception):
+                    app.logger.error(f"Error fetching token: {response}")
+                    continue
                 if response.status != 200:
-                    app.logger.error(f"Failed to fetch tokens, status: {response.status}")
-                    return None
+                    app.logger.error(f"Token API failed with status: {response.status}")
+                    continue
                 data = await response.json()
-                tokens = data.get("tokens")
+                tokens = data.get("tokens", [])
                 if not tokens:
-                    app.logger.error("No tokens received from JWT API.")
-                    return None
-                return tokens
+                    app.logger.error("No tokens in this response.")
+                    continue
+                all_tokens.extend(tokens)
+
+        if not all_tokens:
+            app.logger.error("No tokens received from any API.")
+            return None
+        return all_tokens
+
     except Exception as e:
-        app.logger.error(f"Error fetching tokens from JWT API: {e}")
+        app.logger.error(f"Error fetching tokens: {e}")
         return None
 
 # Send a single like request
@@ -115,9 +133,9 @@ async def send_multiple_requests(uid, server_name, url):
             app.logger.error("Encryption failed.")
             return None
 
-        tokens = await fetch_tokens_from_jwt_api()
+        tokens = await fetch_all_tokens()
         if tokens is None:
-            app.logger.error("Failed to load tokens from JWT API.")
+            app.logger.error("Failed to load tokens from JWT APIs.")
             return None
 
         tasks = []
@@ -194,7 +212,7 @@ def handle_requests():
             tokens_list = tokens_data.get("tokens")
             if not tokens_list:
                 raise Exception("No tokens received from JWT API.")
-            token = tokens_list[0]  # Note: list of strings, no ["token"]
+            token = tokens_list[0]
 
             encrypted_uid = enc(uid)
             if encrypted_uid is None:
