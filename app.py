@@ -27,7 +27,7 @@ def encrypt_message(plaintext):
         app.logger.error(f"Error encrypting message: {e}")
         return None
 
-# Create Like protobuf message
+# Create protobuf messages
 def create_protobuf_message(user_id, region):
     try:
         message = like_pb2.like()
@@ -38,7 +38,6 @@ def create_protobuf_message(user_id, region):
         app.logger.error(f"Error creating protobuf message: {e}")
         return None
 
-# Create UID protobuf message
 def create_protobuf(uid):
     try:
         message = uid_generator_pb2.uid_generator()
@@ -49,52 +48,42 @@ def create_protobuf(uid):
         app.logger.error(f"Error creating uid protobuf: {e}")
         return None
 
-# Encrypt UID protobuf
 def enc(uid):
     protobuf_data = create_protobuf(uid)
     if protobuf_data is None:
         return None
-    encrypted_uid = encrypt_message(protobuf_data)
-    return encrypted_uid
+    return encrypt_message(protobuf_data)
 
-# Fetch tokens from all 5 JWT APIs
+# Fetch tokens from multiple JWT APIs
 async def fetch_all_tokens():
     urls = [
         "https://free-fire-india-six.vercel.app/token",
         "https://free-fire-india-five.vercel.app/token",
         "https://free-fire-india-four.vercel.app/token",
-        "https://free-fire-india-tthree.vercel.app/token",
+        "https://free-fire-india-three.vercel.app/token",
         "https://free-fire-india-two.vercel.app/token"
     ]
     all_tokens = []
     try:
         async with aiohttp.ClientSession() as session:
-            tasks = [session.get(url) for url in urls]
+            tasks = [session.get(url, timeout=10) for url in urls]
             responses = await asyncio.gather(*tasks, return_exceptions=True)
             for response in responses:
                 if isinstance(response, Exception):
-                    app.logger.error(f"Error fetching token: {response}")
+                    app.logger.error(f"Token fetch error: {response}")
                     continue
                 if response.status != 200:
                     app.logger.error(f"Token API failed with status: {response.status}")
                     continue
                 data = await response.json()
                 tokens = data.get("tokens", [])
-                if not tokens:
-                    app.logger.error("No tokens in this response.")
-                    continue
                 all_tokens.extend(tokens)
-
-        if not all_tokens:
-            app.logger.error("No tokens received from any API.")
-            return None
-        return all_tokens
-
+        return all_tokens if all_tokens else None
     except Exception as e:
         app.logger.error(f"Error fetching tokens: {e}")
         return None
 
-# Send a single like request
+# Send like request for a token
 async def send_request(encrypted_uid, token, url):
     try:
         edata = bytes.fromhex(encrypted_uid)
@@ -111,156 +100,123 @@ async def send_request(encrypted_uid, token, url):
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=edata, headers=headers) as response:
-                if response.status != 200:
-                    app.logger.error(f"Request failed with status code: {response.status}")
-                    return response.status
-                return await response.text()
+                return await response.text() if response.status == 200 else None
     except Exception as e:
-        app.logger.error(f"Exception in send_request: {e}")
+        app.logger.error(f"Send request error: {e}")
         return None
 
-# Send multiple like requests (one per token)
+# Send requests in batches
 async def send_multiple_requests(uid, server_name, url):
     try:
         region = server_name
-        protobuf_message = create_protobuf_message(uid, region)
-        if protobuf_message is None:
-            app.logger.error("Failed to create protobuf message.")
+        protobuf_msg = create_protobuf_message(uid, region)
+        if not protobuf_msg:
             return None
-
-        encrypted_uid = encrypt_message(protobuf_message)
-        if encrypted_uid is None:
-            app.logger.error("Encryption failed.")
+        encrypted_uid = encrypt_message(protobuf_msg)
+        if not encrypted_uid:
             return None
 
         tokens = await fetch_all_tokens()
-        if tokens is None:
-            app.logger.error("Failed to load tokens from JWT APIs.")
+        if not tokens:
             return None
 
-        tasks = []
-        for token in tokens:
-            tasks.append(send_request(encrypted_uid, token, url))
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        batch_size = 20
+        results = []
+        for i in range(0, len(tokens), batch_size):
+            batch = tokens[i:i + batch_size]
+            tasks = [send_request(encrypted_uid, token, url) for token in batch]
+            results.extend(await asyncio.gather(*tasks))
         return results
-
     except Exception as e:
-        app.logger.error(f"Exception in send_multiple_requests: {e}")
+        app.logger.error(f"Batch request error: {e}")
         return None
 
-# Decode protobuf data into object
+# Decode protobuf response
 def decode_protobuf(binary):
     try:
-        items = like_count_pb2.Info()
-        items.ParseFromString(binary)
-        return items
-    except DecodeError as e:
-        app.logger.error(f"Error decoding Protobuf data: {e}")
-        return None
+        item = like_count_pb2.Info()
+        item.ParseFromString(binary)
+        return item
     except Exception as e:
-        app.logger.error(f"Unexpected error during protobuf decoding: {e}")
+        app.logger.error(f"Protobuf decode error: {e}")
         return None
 
-# Make request to GetPlayerPersonalShow endpoint
-def make_request(encrypt, server_name, token):
+# Request player data
+def make_request(encrypted, region, token):
     try:
-        if server_name == "IND":
-            url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
-        elif server_name in {"BR", "US", "SAC", "NA"}:
-            url = "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
-        else:
-            url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
-        edata = bytes.fromhex(encrypt)
+        url_map = {
+            "IND": "https://client.ind.freefiremobile.com/GetPlayerPersonalShow",
+            "BR": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+            "US": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+            "SAC": "https://client.us.freefiremobile.com/GetPlayerPersonalShow",
+            "NA": "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
+        }
+        url = url_map.get(region, "https://clientbp.ggblueshark.com/GetPlayerPersonalShow")
+        edata = bytes.fromhex(encrypted)
         headers = {
-            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
-            'Connection': "Keep-Alive",
-            'Accept-Encoding': "gzip",
             'Authorization': f"Bearer {token}",
-            'Content-Type': "application/x-www-form-urlencoded",
-            'Expect': "100-continue",
-            'X-Unity-Version': "2018.4.11f1",
-            'X-GA': "v1 1",
-            'ReleaseVersion': "OB49"
+            'Content-Type': "application/x-www-form-urlencoded"
         }
         response = requests.post(url, data=edata, headers=headers, verify=False)
-        binary = response.content
-        decode = decode_protobuf(binary)
-        if decode is None:
-            app.logger.error("Protobuf decoding returned None.")
-        return decode
+        return decode_protobuf(response.content)
     except Exception as e:
-        app.logger.error(f"Error in make_request: {e}")
+        app.logger.error(f"Make request error: {e}")
         return None
 
 @app.route('/like', methods=['GET'])
 def handle_requests():
     uid = request.args.get("uid")
-    server_name = request.args.get("region", "").upper()
+    region = request.args.get("region", "IND").upper()
     key = request.args.get("key")
-
-    if not uid or not server_name or not key:
-        return jsonify({"error": "UID, region, and key are required"}), 400
 
     if key != "2yearkeysforujjaiwal":
         return jsonify({"error": "Invalid API key"}), 403
+    if not uid or not region:
+        return jsonify({"error": "Missing uid or region"}), 400
 
     try:
-        def process_request():
-            # Fetch tokens synchronously for initial info
-            tokens_data = requests.get("https://free-fire-india-six.vercel.app/token").json()
-            tokens_list = tokens_data.get("tokens")
-            if not tokens_list:
-                raise Exception("No tokens received from JWT API.")
-            token = tokens_list[0]
+        token_resp = requests.get("https://free-fire-india-six.vercel.app/token", timeout=10).json()
+        token = token_resp.get("tokens", [None])[0]
+        if not token:
+            raise Exception("No initial token available.")
 
-            encrypted_uid = enc(uid)
-            if encrypted_uid is None:
-                raise Exception("Encryption of UID failed.")
+        encrypted_uid = enc(uid)
+        if not encrypted_uid:
+            raise Exception("Encryption failed.")
 
-            before = make_request(encrypted_uid, server_name, token)
-            if before is None:
-                raise Exception("Failed to retrieve initial player info.")
-            jsone = MessageToJson(before)
-            data_before = json.loads(jsone)
-            before_like = int(data_before.get('AccountInfo', {}).get('Likes', 0))
-            app.logger.info(f"Likes before command: {before_like}")
+        before = make_request(encrypted_uid, region, token)
+        if not before:
+            raise Exception("Failed to fetch initial player info.")
+        data_before = json.loads(MessageToJson(before))
+        before_like = int(data_before.get("AccountInfo", {}).get("Likes", 0))
 
-            # Select the like endpoint
-            if server_name == "IND":
-                like_url = "https://client.ind.freefiremobile.com/LikeProfile"
-            elif server_name in {"BR", "US", "SAC", "NA"}:
-                like_url = "https://client.us.freefiremobile.com/LikeProfile"
-            else:
-                like_url = "https://clientbp.ggblueshark.com/LikeProfile"
+        like_url = (
+            "https://client.ind.freefiremobile.com/LikeProfile"
+            if region == "IND"
+            else "https://client.us.freefiremobile.com/LikeProfile"
+        )
 
-            # Send all like requests
-            asyncio.run(send_multiple_requests(uid, server_name, like_url))
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(send_multiple_requests(uid, region, like_url))
 
-            after = make_request(encrypted_uid, server_name, token)
-            if after is None:
-                raise Exception("Failed to retrieve player info after like requests.")
-            jsone_after = MessageToJson(after)
-            data_after = json.loads(jsone_after)
-            after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
-            player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
-            player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
-            like_given = after_like - before_like
-            status = 1 if like_given != 0 else 2
-            result = {
-                "LikesGivenByAPI": like_given,
-                "LikesbeforeCommand": before_like,
-                "LikesafterCommand": after_like,
-                "PlayerNickname": player_name,
-                "UID": player_uid,
-                "status": status
-            }
-            return result
+        after = make_request(encrypted_uid, region, token)
+        if not after:
+            raise Exception("Failed to fetch final player info.")
+        data_after = json.loads(MessageToJson(after))
+        after_like = int(data_after.get("AccountInfo", {}).get("Likes", 0))
 
-        result = process_request()
-        return jsonify(result)
+        return jsonify({
+            "LikesGivenByAPI": after_like - before_like,
+            "LikesbeforeCommand": before_like,
+            "LikesafterCommand": after_like,
+            "PlayerNickname": data_after.get("AccountInfo", {}).get("PlayerNickname", ""),
+            "UID": uid,
+            "status": 1 if after_like > before_like else 2
+        })
+
     except Exception as e:
-        app.logger.error(f"Error processing request: {e}")
+        app.logger.error(f"Final handler error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
