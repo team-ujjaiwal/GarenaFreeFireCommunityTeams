@@ -22,7 +22,7 @@ import atexit
 app = Flask(__name__)
 
 # MongoDB configuration
-client = MongoClient(mongodb+srv://dk5801690:PWCzVm5tOCixMpAD@cluster0.yxu5vet.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0)
+client = MongoClient("mongodb+srv://dk5801690:PWCzVm5tOCixMpAD@cluster0.yxu5vet.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
 db = client.yourdb
 keys_collection = db.api_keys
 
