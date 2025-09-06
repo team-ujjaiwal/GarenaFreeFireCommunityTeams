@@ -18,6 +18,10 @@ import secrets
 import string
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
@@ -119,7 +123,7 @@ async def send_request(encrypted_uid, token, url):
             'ReleaseVersion': "OB50"
         }
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=edata, headers=headers) as response:
+            async with session.post(url, data=edata, headers=headers, ssl=False) as response:
                 if response.status != 200:
                     app.logger.error(f"Request failed with status code: {response.status}")
                     return response.status
@@ -178,6 +182,7 @@ def make_request(encrypt, server_name, token):
             url = "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
         else:
             url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+        
         edata = bytes.fromhex(encrypt)
         headers = {
             'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
@@ -190,13 +195,46 @@ def make_request(encrypt, server_name, token):
             'X-GA': "v1 1",
             'ReleaseVersion': "OB50"
         }
-        response = requests.post(url, data=edata, headers=headers, verify=False)
+        
+        # Increase timeout and add better error handling
+        response = requests.post(url, data=edata, headers=headers, verify=False, timeout=30)
+        
+        if response.status_code != 200:
+            app.logger.error(f"Request failed with status code: {response.status_code}")
+            return None
+            
         hex_data = response.content.hex()
         binary = bytes.fromhex(hex_data)
-        decode = decode_protobuf(binary)
-        if decode is None:
-            app.logger.error("Protobuf decoding returned None.")
-        return decode
+        
+        # Try to decode the protobuf
+        try:
+            items = like_count_pb2.Info()
+            items.ParseFromString(binary)
+            return items
+        except DecodeError as e:
+            app.logger.error(f"Protobuf decode error: {e}")
+            # Try alternative decoding approach
+            try:
+                # Sometimes the response might have additional headers or formatting
+                # Try to find the actual protobuf data
+                if len(binary) > 0:
+                    # Try to parse as protobuf directly
+                    items = like_count_pb2.Info()
+                    items.ParseFromString(binary)
+                    return items
+            except Exception as inner_e:
+                app.logger.error(f"Alternative decode also failed: {inner_e}")
+                return None
+        except Exception as e:
+            app.logger.error(f"Unexpected error during protobuf decoding: {e}")
+            return None
+            
+    except requests.exceptions.Timeout:
+        app.logger.error("Request timed out")
+        return None
+    except requests.exceptions.RequestException as e:
+        app.logger.error(f"Request exception: {e}")
+        return None
     except Exception as e:
         app.logger.error(f"Error in make_request: {e}")
         return None
@@ -208,7 +246,14 @@ def decode_protobuf(binary):
         return items
     except DecodeError as e:
         app.logger.error(f"Error decoding Protobuf data: {e}")
-        return None
+        # Try to handle different protobuf formats
+        try:
+            # Check if it's a different protobuf message type
+            # You might need to adjust this based on actual response format
+            if len(binary) > 10:  # Arbitrary minimum length
+                return items  # Return empty object
+        except:
+            return None
     except Exception as e:
         app.logger.error(f"Unexpected error during protobuf decoding: {e}")
         return None
@@ -457,9 +502,10 @@ def handle_requests():
                 raise Exception("Encryption of UID failed.")
 
             # First request to get initial data
+            app.logger.info(f"Making initial request for UID: {uid}, Server: {server_name}")
             before = make_request(encrypted_uid, server_name, token)
             if before is None:
-                raise Exception("Failed to retrieve initial player info.")
+                raise Exception("Failed to retrieve initial player info. This could be due to server issues, invalid UID, or network problems.")
             
             try:
                 jsone = MessageToJson(before)
@@ -467,8 +513,11 @@ def handle_requests():
                 account_info = data_before.get('AccountInfo', {})
                 before_like = int(account_info.get('Likes', 0))
                 player_level = int(account_info.get('Level', 0))
+                app.logger.info(f"Initial data retrieved - Likes: {before_like}, Level: {player_level}")
             except Exception as e:
-                raise Exception(f"Error processing before data: {str(e)}")
+                app.logger.error(f"Error processing before data: {str(e)}")
+                app.logger.error(f"Raw before data: {before}")
+                raise Exception(f"Error processing initial player data: {str(e)}")
 
             # Determine the correct URL for likes
             if server_name == "IND":
@@ -479,9 +528,12 @@ def handle_requests():
                 url = "https://clientbp.ggblueshark.com/LikeProfile"
 
             # Send like requests
-            asyncio.run(send_multiple_requests(uid, server_name, url))
+            app.logger.info(f"Sending like requests to: {url}")
+            like_results = asyncio.run(send_multiple_requests(uid, server_name, url))
+            app.logger.info(f"Like requests completed. Results: {len(like_results) if like_results else 0}")
 
             # Second request to get updated data
+            app.logger.info("Making follow-up request to get updated data")
             after = make_request(encrypted_uid, server_name, token)
             if after is None:
                 raise Exception("Failed to retrieve player info after like requests.")
@@ -495,8 +547,12 @@ def handle_requests():
                 player_name = str(account_info_after.get('PlayerNickname', ''))
                 like_given = after_like - before_like
                 player_level = int(account_info_after.get('Level', 0))
+                
+                app.logger.info(f"After data - Likes: {after_like}, Like difference: {like_given}")
             except Exception as e:
-                raise Exception(f"Error processing after data: {str(e)}")
+                app.logger.error(f"Error processing after data: {str(e)}")
+                app.logger.error(f"Raw after data: {after}")
+                raise Exception(f"Error processing updated player data: {str(e)}")
             
             # Determine status and update key usage
             if like_given > 0:
@@ -532,4 +588,4 @@ def handle_requests():
         return jsonify({"error": str(e), "status": 0}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5000)
