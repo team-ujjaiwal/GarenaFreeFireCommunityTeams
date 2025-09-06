@@ -20,8 +20,9 @@ import os
 
 app = Flask(__name__)
 
-# JSON file path for storing API keys
-KEY_FILE_PATH = "/storage/emulated/0/f/0/key.json"
+# For Vercel deployment, we'll use in-memory storage
+# In production, you should use a proper database
+API_KEYS_STORAGE = {}
 
 # Initialize scheduler for daily reset
 scheduler = BackgroundScheduler(daemon=True)
@@ -29,22 +30,38 @@ scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 
 def load_keys():
-    """Load API keys from JSON file"""
+    """Load API keys from storage"""
     try:
-        if os.path.exists(KEY_FILE_PATH):
-            with open(KEY_FILE_PATH, 'r') as f:
-                return json.load(f)
-        return []
+        # For Vercel deployment, use in-memory storage
+        if os.environ.get('VERCEL') or os.environ.get('PRODUCTION'):
+            # Return all keys from memory
+            return list(API_KEYS_STORAGE.values())
+        else:
+            # Local file storage for development
+            KEY_FILE_PATH = "/storage/emulated/0/f/0/key.json"
+            if os.path.exists(KEY_FILE_PATH):
+                with open(KEY_FILE_PATH, 'r') as f:
+                    return json.load(f)
+            return []
     except Exception as e:
         app.logger.error(f"Error loading keys: {e}")
         return []
 
 def save_keys(keys):
-    """Save API keys to JSON file"""
+    """Save API keys to storage"""
     try:
-        with open(KEY_FILE_PATH, 'w') as f:
-            json.dump(keys, f, default=str, indent=4)
-        return True
+        # For Vercel deployment, use in-memory storage
+        if os.environ.get('VERCEL') or os.environ.get('PRODUCTION'):
+            # Update in-memory storage
+            for key in keys:
+                API_KEYS_STORAGE[key['key']] = key
+            return True
+        else:
+            # Local file storage for development
+            KEY_FILE_PATH = "/storage/emulated/0/f/0/key.json"
+            with open(KEY_FILE_PATH, 'w') as f:
+                json.dump(keys, f, default=str, indent=4)
+            return True
     except Exception as e:
         app.logger.error(f"Error saving keys: {e}")
         return False
@@ -85,15 +102,19 @@ scheduler.add_job(
 
 def load_tokens(server_name):
     try:
+        # For Vercel, you'll need to store these token files in your project
+        # and ensure they're included in the deployment
+        token_dir = os.path.join(os.path.dirname(__file__), 'tokens')
+        
         if server_name == "IND":
-            with open("token_ind.json", "r") as f:
-                tokens = json.load(f)
+            token_file = os.path.join(token_dir, "token_ind.json")
         elif server_name in {"BR", "US", "SAC", "NA"}:
-            with open("token_br.json", "r") as f:
-                tokens = json.load(f)
+            token_file = os.path.join(token_dir, "token_br.json")
         else:
-            with open("token_bd.json", "r") as f:
-                tokens = json.load(f)
+            token_file = os.path.join(token_dir, "token_bd.json")
+            
+        with open(token_file, "r") as f:
+            tokens = json.load(f)
         return tokens
     except Exception as e:
         app.logger.error(f"Error loading tokens for server {server_name}: {e}")
@@ -133,7 +154,7 @@ async def send_request(encrypted_uid, token, url):
             'Expect': "100-continue",
             'X-Unity-Version': "2018.4.11f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB49"
+            'ReleaseVersion': "OB50"
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=edata, headers=headers) as response:
@@ -205,7 +226,7 @@ def make_request(encrypt, server_name, token):
             'Expect': "100-continue",
             'X-Unity-Version': "2018.4.11f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB49"
+            'ReleaseVersion': "OB50"
         }
         response = requests.post(url, data=edata, headers=headers, verify=False)
         hex_data = response.content.hex()
@@ -547,6 +568,11 @@ def handle_requests():
     except Exception as e:
         app.logger.error(f"Error processing request: {e}")
         return jsonify({"error": str(e), "status": 0}), 500
+
+# For Vercel deployment
+@app.route('/')
+def home():
+    return jsonify({"message": "Free Fire API Service is running"})
 
 if __name__ == '__main__':
     app.run(debug=True)
