@@ -1,4 +1,4 @@
-Flask[async]
+Flask
 pymongo
 requests
 aiohttp
