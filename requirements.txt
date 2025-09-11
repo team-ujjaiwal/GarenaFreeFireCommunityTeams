@@ -1,9 +1,8 @@
 Flask[async]
-pymongo
 requests
 aiohttp
 googleapis-common-protos
 pycryptodome
 protobuf
 Werkzeug
-apscheduler
+protobuf-decoder
